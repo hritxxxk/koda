@@ -1,0 +1,36 @@
+id = "two-sum"
+title = "Two Sum"
+difficulty = "Easy"
+topic = "Arrays"
+description = """
+Given an array of integers `nums` and an integer `target`, return indices of the two numbers such that they add up to `target`.
+"""
+constraints = [
+    "2 <= nums.length <= 10^4",
+    "Only one valid answer exists."
+]
+
+[function]
+name = "twoSum"
+return_type = "List[int]"
+compare = "sorted"
+
+[[function.params]]
+name = "nums"
+type = "List[int]"
+
+[[function.params]]
+name = "target"
+type = "int"
+
+[[test_cases]]
+input = "2, 7, 11, 15\n9"
+expected = "0, 1"
+
+[[test_cases]]
+input = "3, 2, 4\n6"
+expected = "1, 2"
+
+[[test_cases]]
+input = "3, 3\n6"
+expected = "0, 1"

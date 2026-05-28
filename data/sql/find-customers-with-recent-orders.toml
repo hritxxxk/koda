@@ -1,0 +1,7 @@
+id = "find-customers-with-recent-orders"
+title = "Find Customers with Recent Orders"
+difficulty = "Easy"
+category = "INNER JOIN"
+schema_definition = "CREATE TABLE customers (\n    customer_id INTEGER PRIMARY KEY,\n    customer_name TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n    order_id INTEGER PRIMARY KEY,\n    customer_id INTEGER NOT NULL,\n    order_date DATE NOT NULL,\n    amount REAL NOT NULL,\n    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)\n);\n\nINSERT INTO customers (customer_id, customer_name) VALUES\n(1, 'Alice'),\n(2, 'Bob'),\n(3, 'Charlie'),\n(4, 'David');\n\nINSERT INTO orders (order_id, customer_id, order_date, amount)\nVALUES\n(101, 1, '2023-10-01', 50.00),\n(102, 2, '2023-10-15', 75.50),\n(103, 1, '2023-11-05', 120.00),\n(104, 3, '2023-11-10', 30.25),\n(105, 2, '2023-11-20', 90.00),\n(106, 1, '2023-11-25', 65.75);"
+description = "You are given two tables: `customers` and `orders`. The `customers` table contains information about customers, and the `orders` table contains information about their orders. Your task is to write a SQL query that returns the names of all customers who have placed an order in the last 30 days.\n\nUse an `INNER JOIN` to combine the two tables and filter the results based on the order date."
+expected_output = "[{\"customer_name\": \"Alice\"}, {\"customer_name\": \"Bob\"}, {\"customer_name\": \"Charlie\"}]"

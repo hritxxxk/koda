@@ -1,0 +1,39 @@
+id = "merge-sort"
+title = "Merge Sort"
+difficulty = "Medium"
+topic = "Sorting"
+description = """
+Implement the **Merge Sort** algorithm to sort an array of integers in ascending order.
+
+Merge sort is a divide-and-conquer algorithm that works by recursively breaking down a problem into two or more sub-problems of the same or related type, until these become simple enough to be solved directly.
+"""
+constraints = [
+    "1 <= nums.length <= 5 * 10^4",
+    "-5 * 10^4 <= nums[i] <= 5 * 10^4",
+    "Solution should have O(n log n) time complexity."
+]
+
+[function]
+name = "sortArray"
+return_type = "List[int]"
+compare = "exact"
+
+[[function.params]]
+name = "nums"
+type = "List[int]"
+
+[[test_cases]]
+input = "5, 2, 3, 1"
+expected = "1, 2, 3, 5"
+
+[[test_cases]]
+input = "5, 1, 1, 2, 0, 0"
+expected = "0, 0, 1, 1, 2, 5"
+
+[[test_cases]]
+input = "1"
+expected = "1"
+
+[[test_cases]]
+input = ""
+expected = ""

@@ -1,0 +1,24 @@
+# SQL Problem Example TOML
+
+id = "employee-salaries"
+title = "High Salary Employees"
+difficulty = "Easy"
+category = "Filtering"
+description = "Find all employees with a salary greater than 50000. Return their name and salary."
+
+# Schema Definition: CREATE statements
+schema_definition = """
+CREATE TABLE employees (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    salary INTEGER NOT NULL,
+    department_id INTEGER
+);
+
+INSERT INTO employees (id, name, salary, department_id) VALUES (1, 'Alice', 60000, 1);
+INSERT INTO employees (id, name, salary, department_id) VALUES (2, 'Bob', 45000, 1);
+INSERT INTO employees (id, name, salary, department_id) VALUES (3, 'Charlie', 70000, 2);
+"""
+
+# Expected Output: JSON string of list of dicts
+expected_output = '[{"name": "Alice", "salary": 60000}, {"name": "Charlie", "salary": 70000}]'

@@ -1,0 +1,27 @@
+[project]
+name = "ai-dsa"
+version = "0.1.0"
+description = "Terminal-based DSA practice with AI hints and code execution sandbox."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "textual",
+    "click",
+    "anthropic",
+    "openai",
+    "google-genai",
+    "httpx",
+    "python-dotenv",
+    "tomli-w",
+]
+
+[project.scripts]
+ai-dsa = "ai_dsa.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,0 +1,5 @@
+*.md
+.env
+tests/
+__pycache__/
+*.db
