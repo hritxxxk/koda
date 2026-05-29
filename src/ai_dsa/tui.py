@@ -51,11 +51,11 @@ class StartupScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="startup-container"):
             yield Label(r"""
-            ██   ██  ██████  ██████   █████
-            ██  ██  ██    ██ ██   ██ ██   ██
-            █████   ██    ██ ██   ██ ███████
-            ██  ██  ██    ██ ██   ██ ██   ██
-            ██   ██  ██████  ██████  ██   ██
+    ██   ██  ██████  ██████   █████
+    ██  ██  ██    ██ ██   ██ ██   ██
+    █████   ██    ██ ██   ██ ███████
+    ██  ██  ██    ██ ██   ██ ██   ██
+    ██   ██  ██████  ██████  ██   ██
             """, id="ascii-logo")
             yield Label("Select your training path:", id="startup-subtitle")
             
@@ -189,6 +189,7 @@ class PythonEditor(TextArea):
         self._refresh_indent_settings()
         self._lint_task = None
         self._lint_errors = {} # line -> message
+        self._lint_version = 0 
 
     def _refresh_indent_settings(self) -> None:
         """Scan content to detect indentation style."""
@@ -197,20 +198,45 @@ class PythonEditor(TextArea):
         self.indent_unit = char * width
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        """Trigger background linting on change (debounced)."""
-        if self.language == "python":
-            if self._lint_task:
-                self._lint_task.cancel()
-            
-            async def run_lint():
-                await asyncio.sleep(1.0) # Debounce
-                issues = await asyncio.to_thread(Linter.lint_code, self.text)
-                self._lint_errors = {i["line"]: i["message"] for i in issues}
-                # Update app status or gutter if available
-                if hasattr(self.app, "update_editor_lint"):
-                    self.app.update_editor_lint(issues)
-            
-            self._lint_task = asyncio.create_task(run_lint())
+        if self.language != "python":
+            return
+
+        if self._lint_task:
+            self._lint_task.cancel()
+
+        self._lint_version += 1
+        version = self._lint_version
+        text = self.text
+
+        async def run_lint():
+            try:
+                await asyncio.sleep(1.0)
+
+                issues = await asyncio.to_thread(
+                    Linter.lint_code,
+                    text,
+                )
+
+                if version != self._lint_version:
+                    return
+
+                self._lint_errors = {
+                    i["line"]: i["message"]
+                    for i in issues
+                }
+
+                update_fn = getattr(
+                    self.app,
+                    "update_editor_lint",
+                    None,
+                )
+                if update_fn:
+                    update_fn(issues)
+
+            except asyncio.CancelledError:
+                pass
+
+        self._lint_task = asyncio.create_task(run_lint())
 
     def action_submit(self) -> None:
         asyncio.create_task(self.app.action_submit())
@@ -483,9 +509,25 @@ class StatsScreen(Screen):
         if not stats_data:
             content = "# No stats found yet. Start practicing!"
         else:
+            # --- FIX START: Calculate Totals ---
+            # Create a map of topic -> total_count
+            totals = {}
+            
+            # Count DSA problems
+            for p in self.app.bank.problems:
+                totals[p.topic] = totals.get(p.topic, 0) + 1
+            
+            # Count SQL problems
+            for p in self.app.sql_bank.problems:
+                totals[p.category] = totals.get(p.category, 0) + 1
+            # --- FIX END ---
+
             content = "# Your Progress\n\n| Topic | Solved | Total |\n|---|---|---|\n"
             for row in stats_data:
-                content += f"| {row['topic']} | {row['solved_count']} | - |\n"
+                topic = row['topic']
+                solved = row['solved_count']
+                total = totals.get(topic, "Unknown") # Get dynamic total
+                content += f"| {topic} | {solved} | {total} |\n"
         
         self.query_one("#stats-content", Markdown).update(content)
 
@@ -518,34 +560,35 @@ class OptionsScreen(ModalScreen):
                 yield Button("Cancel", id="cancel-btn")
 
     def on_mount(self) -> None:
-        self.update_models(self.query_one("#provider-select", Select).value)
+        # Use a task because update_models is now async
+        asyncio.create_task(self.update_models(self.query_one("#provider-select", Select).value))
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "provider-select":
-            self.update_models(str(event.value))
+            asyncio.create_task(self.update_models(str(event.value)))
 
-    def update_models(self, provider: str) -> None:
+    async def update_models(self, provider: str) -> None:
+        """Dynamically fetch models from the provider."""
         select = self.query_one("#model-select", Select)
-        if provider == "gemini":
-            models = [("Gemini 2.0 Flash", "gemini-2.0-flash"), ("Gemini 1.5 Pro", "gemini-1.5-pro")]
-        elif provider == "anthropic":
-            models = [("Claude 3.5 Sonnet", "claude-3-5-sonnet-20241022"), ("Claude 3 Opus", "claude-3-opus-20240229")]
-        elif provider == "openai":
-            models = [("GPT-4o", "gpt-4o"), ("GPT-4 Turbo", "gpt-4-turbo")]
-        else:
-            models = [
-                ("Qwen 2.5 (7B)", "qwen2.5:7b"),
-                ("Llama 3 (8B)", "llama3:8b"),
-                ("Gemma 3 (4B)", "gemma3:4b"),
-                ("Phi-3 (Mini)", "phi3")
-            ]
         
+        try:
+            # Call the provider's dynamic model list
+            # This assumes you added 'async def get_available_models(self)' to your providers
+            available_models = await self.app.ai.get_available_models()
+            
+            # Convert list of strings to list of tuples for Textual Select
+            # e.g., ["gpt-5.5", "gpt-4o"] -> [("GPT-5.5", "gpt-5.5"), ...]
+            models = [(m.replace("_", " ").title(), m) for m in available_models]
+        except Exception:
+            # Fallback to basic defaults if API call fails
+            models = [("Default Model", "default")]
+
         select.set_options(models)
         saved_model = self.app.db.get_setting("ai_model")
         if saved_model and any(m[1] == saved_model for m in models):
             select.value = saved_model
         else:
-            select.value = models[0][1]
+            select.value = models[0][1] if models else None
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-btn":
@@ -587,8 +630,10 @@ class CommandMenu(Static):
 class CommandBar(Input):
     """A terminal-style command bar for AI interactions and app commands."""
     def __init__(self, **kwargs):
-        super().__init__(placeholder="Press / for commands (e.g. /hint, /review, or ask a question...)", **kwargs)
-
+        super().__init__(
+            placeholder="⌨️ /hint, /review, /submit, /clear, or ask a question...", 
+            **kwargs
+        )
     def on_mount(self) -> None:
         self.border_title = "Command"
 
@@ -1407,7 +1452,11 @@ class DSATUI(App):
                 elif base in ["test", "run"]:
                     await self.action_run_tests()
                 elif base == "clear":
-                    self.query_one("#ai-markdown", Markdown).update("*Cleared*")
+                    # 1. Clear the UI
+                    self.query_one("#ai-markdown", Markdown).update("*Conversation history wiped.*")
+                    # 2. Clear the actual AI Provider memory
+                    if hasattr(self.app.ai, "reset_history"):
+                        await self.app.ai.reset_history()
                 elif base == "explain":
                     await self.stream_ai_response("explain")
                 elif base == "note":

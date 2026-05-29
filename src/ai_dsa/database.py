@@ -1,15 +1,9 @@
 import sqlite3
-import os
 import json
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-"""
-Performance Optimizations (Phase 5):
-- Added indexes to user_events (timestamp, event_type) and notes (problem_id) to speed up maintenance and retrieval.
-- Reduced DB round-trips in run_maintenance by using aggregated queries.
-"""
 
 class Database:
     def __init__(self, db_path: str = "dsa.db"):
