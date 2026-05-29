@@ -1,7 +1,8 @@
 import json
 from typing import Optional, Dict, Any
+from .database import Database
 
-def log_event(db, event_type: str, problem_id: str, mode: str, metadata: Optional[Dict[str, Any]] = None) -> int:
+def log_event(db: Database, event_type: str, problem_id: str, mode: str, metadata: Optional[Dict[str, Any]] = None) -> int:
     """Logs a user event to the database and returns the event ID."""
     metadata_json = json.dumps(metadata) if metadata else None
     with db._get_connection() as conn:
@@ -12,7 +13,7 @@ def log_event(db, event_type: str, problem_id: str, mode: str, metadata: Optiona
         conn.commit()
         return cursor.lastrowid
 
-def update_event_metadata(db, event_id: int, metadata: Dict[str, Any]):
+def update_event_metadata(db: Database, event_id: int, metadata: Dict[str, Any]) -> None:
     """Updates the metadata of an existing event."""
     with db._get_connection() as conn:
         # Get existing metadata

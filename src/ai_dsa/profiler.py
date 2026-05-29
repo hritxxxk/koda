@@ -1,11 +1,13 @@
 import json
 from typing import Optional, Dict, Any
+from .database import Database
 
 class UserProfiler:
-    def __init__(self, db):
+    """Manages and updates the user topic performance profiles."""
+    def __init__(self, db: Database):
         self.db = db
 
-    def record_submission(self, topic: str, passed: bool, hints_used: int, time_to_first_keystroke: float, failure_type: Optional[str] = None):
+    def record_submission(self, topic: str, passed: bool, hints_used: int, time_to_first_keystroke: float, failure_type: Optional[str] = None) -> None:
         """Upserts user profile data for a specific topic."""
         with self.db._get_connection() as conn:
             # Get existing data

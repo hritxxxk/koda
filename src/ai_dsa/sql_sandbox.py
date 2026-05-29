@@ -4,14 +4,12 @@ import json
 from typing import List, Dict, Any, Optional
 
 class SQLSandbox:
+    """Executes SQL queries against an in-memory SQLite database."""
     def __init__(self, timeout_sec: int = 5):
         self.timeout_sec = timeout_sec
 
     def run_query(self, query: str, schema_definition: str, expected_output: str) -> Dict[str, Any]:
-        """
-        Runs a SQL query against an in-memory SQLite DB initialized with schema_definition.
-        Compares results with expected_output (JSON string of list of dicts).
-        """
+        """Runs a SQL query and compares the result with the expected output."""
         start_time = time.perf_counter()
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -54,10 +52,6 @@ class SQLSandbox:
         }
 
     def run_test_cases(self, query: str, problem: Any) -> List[Dict[str, Any]]:
-        """
-        Modelled after Sandbox.run_test_cases.
-        For SQL problems, we usually have one main expected output per schema.
-        """
-        # problem is expected to be a SQLProblem model or similar
+        """Runs the query against the problem schema."""
         res = self.run_query(query, problem.schema_definition, problem.expected_output)
         return [res]

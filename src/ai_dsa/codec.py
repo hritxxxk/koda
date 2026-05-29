@@ -2,106 +2,103 @@ import re
 from typing import List, Dict, Tuple, Any
 
 class IndentEngine:
-    """Core logic for detecting and calculating indentation."""
+    """Detects and calculates code indentation patterns."""
     
     @staticmethod
     def detect_indent(text: str) -> Tuple[str, int]:
-        """Infers indentation style (tabs vs spaces) and width."""
-        if not text.strip():
-            return "spaces", 4
+        """Detects the indentation style (spaces/tabs) and size."""
+        if not text:
+            return (" ", 4)
             
-        lines = text.splitlines()[:100]  # Scan first 100 lines
-        spaces_counts = []
-        tabs_count = 0
-        
+        lines = text.splitlines()
         for line in lines:
-            if not line.strip(): continue
-            leading = line[:len(line) - len(line.lstrip())]
-            if "\t" in leading:
-                tabs_count += 1
-            elif leading.startswith(" "):
-                spaces_counts.append(len(leading))
-        
-        if tabs_count > len(spaces_counts):
-            return "tabs", 4
-            
-        # Find most common non-zero difference between indentation levels
-        if not spaces_counts:
-            return "spaces", 4
-            
-        diffs = [spaces_counts[i] - spaces_counts[i-1] for i in range(1, len(spaces_counts)) 
-                 if spaces_counts[i] > spaces_counts[i-1]]
-        
-        if not diffs:
-            return "spaces", spaces_counts[0] if spaces_counts[0] > 0 else 4
-            
-        return "spaces", max(set(diffs), key=diffs.count)
+            match = re.match(r'^(\s+)', line)
+            if match:
+                indent = match.group(1)
+                char = indent[0]
+                size = len(indent)
+                return (char, size)
+        return (" ", 4)
 
 class LanguageRules:
-    """Language-specific indentation heuristics."""
+    """Defines auto-indentation rules for different programming languages."""
     
-    RULES = {
-        "python": {
-            "increase": [r":\s*$", r"\[\s*$", r"\{\s*$", r"\(\s*$"],
-            "decrease": [r"^\s*(return|break|continue|pass|raise)\b"],
-            "dedent_next": [r"^\s*(elif|else|except|finally)\b"]
-        },
-        "javascript": {
-            "increase": [r"\{\s*$", r"\[\s*$", r"\(\s*$"],
-            "decrease": [r"^\s*\}", r"^\s*\]", r"^\s*\)"]
-        }
+    INDENT_TRIGGER = {
+        "python": [":", "[", "{", "("],
+        "javascript": ["{", "[", "("],
+        "sql": ["SELECT", "FROM", "WHERE", "JOIN", "HAVING"]
     }
     
-    @classmethod
-    def get_next_indent(cls, lang: str, current_line: str, current_indent: str, indent_unit: str) -> str:
-        rules = cls.RULES.get(lang, {})
-        stripped = current_line.strip()
-        
-        # Check for increase
-        if any(re.search(pat, current_line) for pat in rules.get("increase", [])):
-            return current_indent + indent_unit
+    @staticmethod
+    def should_indent(line: str, language: str) -> bool:
+        """Determines if the next line should be indented based on the current line's content."""
+        # 1. Strip comments and whitespace
+        clean_line = line.strip()
+        if language == "python":
+            clean_line = clean_line.split("#")[0].strip()
+        elif language == "sql":
+            clean_line = clean_line.split("--")[0].strip()
             
-        # Check for decrease (current line signals the NEXT line should be dedented)
-        if any(re.search(pat, stripped) for pat in rules.get("decrease", [])):
-            if current_indent.startswith(indent_unit):
-                return current_indent[:-len(indent_unit)]
-                
+        if not clean_line:
+            return False
+            
+        # 2. Check triggers
+        triggers = LanguageRules.INDENT_TRIGGER.get(language, [])
+        for trigger in triggers:
+            if clean_line.endswith(trigger):
+                return True
+        return False
+
+    @staticmethod
+    def get_next_indent(language: str, line: str, current_indent: str, indent_unit: str) -> str:
+        """Calculates the indentation string for the next line."""
+        if LanguageRules.should_indent(line, language):
+            return current_indent + indent_unit
         return current_indent
 
 class BracketEngine:
-    """Handles auto-pairing and selection wrapping."""
+    """Handles bracket auto-pairing and selection wrapping."""
     
-    PAIRS = {
-        "(": ")",
-        "[": "]",
-        "{": "}",
-        "'": "'",
-        '"': '"',
-    }
+    PAIRS = {"(": ")", "[": "]", "{": "}", "'": "'", '"': '"'}
     
-    @classmethod
-    def get_closing(cls, char: str) -> str:
-        return cls.PAIRS.get(char)
+    @staticmethod
+    def get_closing(char: str) -> str:
+        """Returns the closing bracket for a given opening bracket."""
+        return BracketEngine.PAIRS.get(char, "")
 
-def deserialize(value: str, type_str: str) -> Any:
-    """Deserializes a string value into a specific Python type."""
+def deserialize(value: str, target_type: str) -> Any:
+    """Converts a string representation to a Python type using JSON logic for robustness."""
+    if not value or value.strip() == "":
+        return None
+        
     value = value.strip()
-    if type_str == "int":
-        return int(value)
-    if type_str == "float":
-        return float(value)
-    if type_str == "bool":
-        return value.lower() == "true"
-    if type_str == "str":
-        return value.strip("'\"")
-    if type_str == "List[int]":
-        return [int(x.strip()) for x in value.strip("[]").split(",") if x.strip()]
-    if type_str == "List[str]":
-        return [x.strip().strip("'\"") for x in value.strip("[]").split(",") if x.strip()]
+    
+    # Try parsing as JSON for lists and booleans
+    try:
+        import json
+        if target_type.startswith("List") or target_type in ("bool", "int", "float"):
+            # Handle Python booleans if they appear in TOML string format
+            if value.lower() == "true": return True
+            if value.lower() == "false": return False
+            return json.loads(value)
+    except:
+        pass
+        
+    if target_type == "int":
+        try: return int(value)
+        except: return 0
+    if target_type == "float":
+        try: return float(value)
+        except: return 0.0
+    if target_type == "str":
+        return value.strip("'").strip('"')
+    if target_type == "bool":
+        return value.lower() in ("true", "1", "yes")
+        
     return value
 
 def compare(actual: Any, expected: Any, mode: str = "exact") -> bool:
-    """Compares two values based on the specified mode."""
+    """Compares two values based on the specified comparison mode."""
     if mode == "sorted":
         try:
             return sorted(actual) == sorted(expected)

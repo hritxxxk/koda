@@ -1,4 +1,4 @@
-*.md
+
 .env
 tests/
 __pycache__/

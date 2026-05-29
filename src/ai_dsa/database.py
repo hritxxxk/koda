@@ -1,7 +1,15 @@
 import sqlite3
 import os
+import json
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+
+"""
+Performance Optimizations (Phase 5):
+- Added indexes to user_events (timestamp, event_type) and notes (problem_id) to speed up maintenance and retrieval.
+- Reduced DB round-trips in run_maintenance by using aggregated queries.
+"""
 
 class Database:
     def __init__(self, db_path: str = "dsa.db"):
@@ -90,6 +98,7 @@ class Database:
                     avg_hints_used REAL DEFAULT 0,
                     avg_time_to_first_keystroke_seconds REAL DEFAULT 0,
                     failure_types TEXT, -- JSON blob
+                    historical_event_counts TEXT, -- JSON blob
                     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -106,7 +115,18 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_user_events_timestamp ON user_events(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_user_events_etype ON user_events(event_type);
+                CREATE INDEX IF NOT EXISTS idx_notes_prob ON notes(problem_id);
             """)
+            
+            # Migration: Add historical_event_counts to user_profile if missing
+            try:
+                conn.execute("ALTER TABLE user_profile ADD COLUMN historical_event_counts TEXT")
+            except sqlite3.OperationalError:
+                pass # Already exists
+                
             conn.commit()
 
     def set_setting(self, key: str, value: str):
@@ -203,9 +223,8 @@ class Database:
             )
             conn.commit()
 
-    def run_maintenance(self):
-        """Prunes old events and maintains DB size."""
-        import logging
+    def run_maintenance(self, bank=None, sql_bank=None):
+        """Prunes old events and maintains DB size, rolling up counts to user_profile."""
         logger = logging.getLogger("maintenance")
         if not logger.handlers:
             handler = logging.FileHandler("maintenance.log")
@@ -215,17 +234,61 @@ class Database:
             
         pruned_count = 0
         with self._get_connection() as conn:
-            # 1. Delete keystroke_first older than 90 days
-            res = conn.execute(
-                "DELETE FROM user_events WHERE event_type = 'keystroke_first' AND timestamp < date('now', '-90 days')"
-            )
-            pruned_count += res.rowcount
+            # 1. Identify rows to prune (older than 30 days)
+            # We rollup ALL events older than 30 days before deleting.
+            rollup_query = """
+                SELECT problem_id, event_type, COUNT(*) as count 
+                FROM user_events 
+                WHERE timestamp < date('now', '-30 days')
+                GROUP BY problem_id, event_type
+            """
+            rows_to_rollup = conn.execute(rollup_query).fetchall()
             
-            # 2. Delete test_passed/failed older than 30 days (simplified)
-            # Metadata summary could be complex, for now let's just prune old high-volume events
-            res = conn.execute(
-                "DELETE FROM user_events WHERE event_type IN ('test_passed', 'test_failed') AND timestamp < date('now', '-30 days')"
-            )
+            if rows_to_rollup:
+                # Build problem -> topic map
+                prob_to_topic = {}
+                # From SQL problems in DB
+                sql_probs = conn.execute("SELECT id, category FROM sql_problems").fetchall()
+                for p in sql_probs:
+                    prob_to_topic[p["id"]] = p["category"]
+                
+                # From DSA bank if provided
+                if bank:
+                    for p in bank.problems:
+                        prob_to_topic[p.id] = p.topic
+                
+                # Aggregate by topic and event_type
+                topic_rollups = {} # topic -> {event_type: total_count}
+                for row in rows_to_rollup:
+                    topic = prob_to_topic.get(row["problem_id"], "Unknown")
+                    if topic not in topic_rollups:
+                        topic_rollups[topic] = {}
+                    topic_rollups[topic][row["event_type"]] = topic_rollups[topic].get(row["event_type"], 0) + row["count"]
+                
+                # Update user_profile
+                for topic, counts in topic_rollups.items():
+                    # Get current historical_event_counts
+                    profile = conn.execute("SELECT historical_event_counts FROM user_profile WHERE topic = ?", (topic,)).fetchone()
+                    
+                    if profile:
+                        existing = json.loads(profile["historical_event_counts"]) if profile["historical_event_counts"] else {}
+                        # Merge
+                        for etype, count in counts.items():
+                            existing[etype] = existing.get(etype, 0) + count
+                        
+                        conn.execute(
+                            "UPDATE user_profile SET historical_event_counts = ? WHERE topic = ?",
+                            (json.dumps(existing), topic)
+                        )
+                    else:
+                        # Create minimal profile if it doesn't exist
+                        conn.execute(
+                            "INSERT INTO user_profile (topic, historical_event_counts) VALUES (?, ?)",
+                            (topic, json.dumps(counts))
+                        )
+            
+            # 2. Delete rows older than 30 days
+            res = conn.execute("DELETE FROM user_events WHERE timestamp < date('now', '-30 days')")
             pruned_count += res.rowcount
             
             # 3. Cap table at 10,000 rows
@@ -241,4 +304,4 @@ class Database:
             conn.commit()
             
         if pruned_count > 0:
-            logger.info(f"Pruned {pruned_count} rows from user_events.")
+            logger.info(f"Pruned {pruned_count} rows from user_events after rolling up history.")

@@ -4,10 +4,11 @@ from textual.screen import ModalScreen, Screen
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
 from textual.events import Key
-from typing import List
+from typing import List, Dict, Any
 import asyncio
 import os
 import time
+import json
 import tempfile
 import subprocess
 from .providers import GeminiProvider, OllamaProvider, AnthropicProvider, OpenAIProvider
@@ -17,6 +18,7 @@ from . import telemetry
 from .profiler import UserProfiler
 from . import recommender
 from . import notes
+from .linter import Linter
 
 class FixModeEntryScreen(ModalScreen):
     """Entry screen for Fix AI Slop mode."""
@@ -49,18 +51,13 @@ class StartupScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="startup-container"):
             yield Label(r"""
-  ▄▄▄       ██▓      ▓█████▄   ██████  ▄▄▄      
- ▒████▄    ▓██▒      ▒██▀ ██▌▒██    ▒ ▒████▄    
- ▒██  ▀█▄  ▒██░      ░██   █▌░ ▓██▄   ▒██  ▀█▄  
- ░██▄▄▄▄██ ▒██░      ░▓█▄   ▌  ▒   ██▒░██▄▄▄▄██ 
-  ▓█   ▓██▒░██████▒   ░▒████▓ ▒██████▒▒ ▓█   ▓██▒
-  ▒▒   ▓▒█░░ ▒░▓  ░    ▒▒▓  ▒ ▒ ▒▓▒ ▒ ░ ▒▒   ▓▒█░
-   ▒   ▒▒ ░░ ░ ▒  ░    ░ ▒  ▒ ░ ░▒  ░ ░  ▒   ▒▒ ░
-   ░   ▒     ░ ░       ░ ░  ░ ░  ░  ░    ░   ▒   
-       ░  ░    ░  ░      ░          ░        ░  ░
-                       ░                        
+            ██   ██  ██████  ██████   █████
+            ██  ██  ██    ██ ██   ██ ██   ██
+            █████   ██    ██ ██   ██ ███████
+            ██  ██  ██    ██ ██   ██ ██   ██
+            ██   ██  ██████  ██████  ██   ██
             """, id="ascii-logo")
-            yield Label("Choose your training mode:", id="startup-subtitle")
+            yield Label("Select your training path:", id="startup-subtitle")
             
             with ListView(id="mode-list"):
                 yield ListItem(Label("[1] DSA Practice"), id="mode-dsa")
@@ -149,19 +146,71 @@ class HelpOverlay(ModalScreen):
     def on_key(self, event: Key) -> None:
         self.dismiss()
 
+class SlopGutter(Static):
+    """A gutter for showing severity markers next to code."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.markers = {} # line_no -> char
+        self.gutter_scroll_offset = 0
+
+    def update_markers(self, issues: List[Dict]):
+        self.markers = {}
+        for issue in issues:
+            line = int(issue["line"])
+            severity = issue["severity"]
+            char = "🔴" if severity == "red" else "🟡" if severity == "yellow" else "🟢"
+            self.markers[line] = char
+        self.refresh()
+
+    def sync_scroll(self, offset: int):
+        self.gutter_scroll_offset = offset
+        self.refresh()
+
+    def render(self):
+        from rich.text import Text
+        lines = []
+        # Adjust for scroll offset
+        # The gutter itself is a Static, we just render lines.
+        # We need to render from gutter_scroll_offset+1 to gutter_scroll_offset+height
+        start_line = int(self.gutter_scroll_offset) + 1
+        height = self.size.height or 50
+        if height == 0: height = 50
+        
+        for i in range(start_line, start_line + height):
+            char = self.markers.get(i, "  ")
+            lines.append(f"{char}")
+        return Text("\n".join(lines))
+
 class PythonEditor(TextArea):
-    """A TextArea subclass with professional, layered editor behavior."""
+    """A professional-grade editor with background linting and smart behavior."""
     
     def on_mount(self) -> None:
         self.border_title = "Editor"
         self._refresh_indent_settings()
+        self._lint_task = None
+        self._lint_errors = {} # line -> message
 
     def _refresh_indent_settings(self) -> None:
         """Scan content to detect indentation style."""
-        style, width = IndentEngine.detect_indent(self.text)
-        self.indent_style = style
+        char, width = IndentEngine.detect_indent(self.text)
         self.indent_width = width
-        self.indent_unit = "\t" if style == "tabs" else (" " * width)
+        self.indent_unit = char * width
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """Trigger background linting on change (debounced)."""
+        if self.language == "python":
+            if self._lint_task:
+                self._lint_task.cancel()
+            
+            async def run_lint():
+                await asyncio.sleep(1.0) # Debounce
+                issues = await asyncio.to_thread(Linter.lint_code, self.text)
+                self._lint_errors = {i["line"]: i["message"] for i in issues}
+                # Update app status or gutter if available
+                if hasattr(self.app, "update_editor_lint"):
+                    self.app.update_editor_lint(issues)
+            
+            self._lint_task = asyncio.create_task(run_lint())
 
     def action_submit(self) -> None:
         asyncio.create_task(self.app.action_submit())
@@ -178,12 +227,12 @@ class PythonEditor(TextArea):
     def action_open_vim(self) -> None:
         asyncio.create_task(self.app.action_open_vim())
 
-    def _on_key(self, event: Key) -> None:
+    def on_key(self, event: Key) -> None:
         # Notify app of first keystroke for telemetry
         if hasattr(self.app, "on_editor_keystroke"):
             self.app.on_editor_keystroke()
             
-        # 1. Bracket Auto-Pairing & Wrapping
+        # 1. Bracket Auto-Pairing
         if event.character and event.character in BracketEngine.PAIRS:
             closing = BracketEngine.get_closing(event.character)
             if self.selection.is_empty:
@@ -206,11 +255,8 @@ class PythonEditor(TextArea):
         if event.key == "enter":
             cursor_row, _ = self.cursor_location
             current_line = self.document[cursor_row]
-            
-            # Base indent from current line
             current_indent = current_line[:len(current_line) - len(current_line.lstrip())]
             
-            # Calculate next indent using language rules
             next_indent = LanguageRules.get_next_indent(
                 self.language or "python", 
                 current_line, 
@@ -218,9 +264,15 @@ class PythonEditor(TextArea):
                 self.indent_unit
             )
             
-            self.insert("\n" + next_indent)
-            event.stop()
-            event.prevent_default()
+            # Only override if we're actually changing the indentation level
+            # OR if we are preserving a non-zero indentation.
+            # If current line is empty and next_indent is empty, let default handle it.
+            if next_indent:
+                self.insert("\n" + next_indent)
+                event.stop()
+                event.prevent_default()
+                return
+            # Else: let Textual handle the default Enter behavior
 
 class ProblemPickerScreen(ModalScreen):
     """Unified screen for selecting or generating problems."""
@@ -333,6 +385,7 @@ class NotesScreen(Screen):
 
     def on_mount(self) -> None:
         self._refresh_notes()
+        self._editing_note_id = None
 
     def _refresh_notes(self) -> None:
         all_notes = notes.get_notes(self.app.db)
@@ -340,7 +393,6 @@ class NotesScreen(Screen):
         # AI Insights
         ai_notes = [n for n in all_notes if n["source"] == "ai_generated"]
         ai_text = ""
-        # Group by mode/problem_id for better display
         for n in ai_notes:
             ai_text += f"- **[{n['mode']}]** {n['content']} *({n['timestamp']})*\n"
         self.query_one("#ai-notes-content", Markdown).update(ai_text or "No AI insights yet.")
@@ -352,9 +404,14 @@ class NotesScreen(Screen):
         for n in manual_notes:
             item = ListItem(Label(f"[{n['mode']}] {n['content']} ({n['timestamp']})"))
             item.note_id = n["id"]
+            item.note_content = n["content"]
+            item.note_source = n["source"]
             manual_list.append(item)
 
     def on_key(self, event: Key) -> None:
+        if self._editing_note_id is not None:
+            return # Let Input handle keys
+
         if event.character == "d":
             # Delete selected manual note
             list_view = self.query_one("#manual-notes-list", ListView)
@@ -365,11 +422,54 @@ class NotesScreen(Screen):
                     conn.commit()
                 self._refresh_notes()
                 self.app.notify("Note deleted.")
+        elif event.character == "e":
+            list_view = self.query_one("#manual-notes-list", ListView)
+            if list_view.highlight_index is not None:
+                # Check if it's AI or manual (though it's in manual list, let's be safe)
+                item = list_view.highlighted_child
+                if item.note_source == "ai_generated":
+                    self.app.notify("AI notes are read-only", severity="warning")
+                else:
+                    self._start_editing(item)
+
+    def _start_editing(self, item: ListItem) -> None:
+        self._editing_note_id = item.note_id
+        # Replace label with Input
+        old_label = item.query_one(Label)
+        new_input = Input(value=item.note_content, id="note-edit-input")
+        item.mount(new_input)
+        old_label.display = False
+        new_input.focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "note-edit-input":
+            new_content = event.value.strip()
+            if new_content:
+                notes.update_note(self.app.db, self._editing_note_id, new_content)
+                self.app.notify("Note updated.")
+            self._editing_note_id = None
+            self._refresh_notes()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # Prevent app-level input handling if any
+        pass
+
+    def action_cancel_edit(self) -> None:
+        if self._editing_note_id is not None:
+            self._editing_note_id = None
+            self._refresh_notes()
 
     BINDINGS = [
-        ("escape", "app.pop_screen", "Back"),
+        ("escape", "cancel_edit_or_back", "Back"),
         ("ctrl+n", "app.pop_screen", "Back")
     ]
+    
+    def action_cancel_edit_or_back(self) -> None:
+        if self._editing_note_id is not None:
+            self._editing_note_id = None
+            self._refresh_notes()
+        else:
+            self.app.pop_screen()
 
 class StatsScreen(Screen):
     """Full-screen overlay for statistics."""
@@ -507,7 +607,8 @@ class CommandBar(Input):
         self.app.query_one("#command-menu", CommandMenu).display = False
 
 class DSATUI(App):
-    """Main TUI for ai-dsa."""
+    """Main TUI for Koda."""
+    TITLE = "Koda"
     CSS = """
     #app-container {
         height: 1fr;
@@ -570,13 +671,28 @@ class DSATUI(App):
         layout: vertical;
     }
 
-    #code-editor {
-        border: thick $primary-lighten-3;
+    #main-editor-container {
         height: 1fr;
+        layout: horizontal;
+        border: thick $primary-lighten-3;
     }
     
-    #code-editor:focus {
+    #main-editor-container:focus-within {
         border: thick $accent;
+    }
+
+    #main-gutter {
+        width: 4;
+        height: 100%;
+        background: $surface;
+        color: $text;
+        content-align: center top;
+        padding-top: 1;
+    }
+
+    #code-editor {
+        border: none;
+        height: 100%;
     }
 
     #slop-container {
@@ -584,13 +700,39 @@ class DSATUI(App):
         height: 1fr;
     }
 
-    #slop-left, #slop-right {
+    #slop-left-container {
+        width: 1fr;
+        height: 100%;
+        layout: horizontal;
+        border: thick $primary-lighten-3;
+    }
+    
+    #slop-left-container:focus-within {
+        border: thick $accent;
+    }
+
+    #slop-gutter {
+        width: 4;
+        height: 100%;
+        background: $surface;
+        color: $text;
+        content-align: center top;
+        padding-top: 1;
+    }
+
+    #slop-left {
+        width: 1fr;
+        height: 100%;
+        border: none;
+    }
+    
+    #slop-right {
         width: 1fr;
         height: 100%;
         border: thick $primary-lighten-3;
     }
     
-    #slop-left:focus, #slop-right:focus {
+    #slop-right:focus {
         border: thick $accent;
     }
 
@@ -869,9 +1011,14 @@ class DSATUI(App):
                 yield Markdown("", id="problem-markdown")
             
             with Vertical(id="editor-pane"):
-                yield PythonEditor(language="python", id="code-editor", show_line_numbers=True, tab_behavior="indent")
+                with Horizontal(id="main-editor-container"):
+                    yield SlopGutter(id="main-gutter")
+                    yield PythonEditor(language="python", id="code-editor", show_line_numbers=True, tab_behavior="indent")
+                
                 with Horizontal(id="slop-container"):
-                    yield TextArea(id="slop-left", read_only=True)
+                    with Horizontal(id="slop-left-container"):
+                        yield SlopGutter(id="slop-gutter")
+                        yield TextArea(id="slop-left", read_only=True)
                     yield PythonEditor(language="python", id="slop-right", show_line_numbers=True, tab_behavior="indent")
             
             with Vertical(id="ai-pane"):
@@ -909,6 +1056,14 @@ class DSATUI(App):
         # Set border titles
         self.query_one("#problem-pane").border_title = "Problem"
         self.query_one("#ai-pane").border_title = "AI Panel"
+        
+        # Watch cursor for slop issues
+        self.watch(self.query_one("#slop-left"), "cursor_location", self._on_slop_cursor_move)
+        self.watch(self.query_one("#code-editor"), "cursor_location", self._on_main_cursor_move)
+        
+        # Watch scroll for gutter sync
+        self.watch(self.query_one("#code-editor"), "scroll_y", self._sync_main_gutter)
+        self.watch(self.query_one("#slop-left"), "scroll_y", self._sync_slop_gutter)
 
         self.hint_count = 0
         self.last_hint_time = 0.0
@@ -919,6 +1074,8 @@ class DSATUI(App):
         self._load_timestamp = None
         self._last_failure_type = None
         self._time_to_first_keystroke = 0.0
+        self._slop_issues = {}
+        self._main_lint_issues = {}
         # self.mode is already set in cli.py if flags were used
 
         self.provider_name = self.db.get_setting("ai_provider", "ollama")
@@ -944,15 +1101,6 @@ class DSATUI(App):
                                 asyncio.create_task(self.action_generate_slop_prompt())
                     self.push_screen("fix_entry", on_fix_entry)
 
-
-        # Logic to decide whether to show startup screen
-        # If no problem was passed AND no explicit mode flag was passed (defaulted to DSA in cli.py but we can detect if it was explicit)
-        # Actually, let's just check if app.problem is set. If not, show startup.
-        # But wait, if they passed --dsa but no ID, we still want to show ProblemPicker but maybe skip StartupScreen.
-        
-        # Let's refine cli.py to pass a 'show_startup' flag or just check if it's explicitly set.
-        # For now, if problem is set, load it. If not, show startup.
-        
         if hasattr(self, 'problem') and self.problem is not None:
             self.update_layout_for_mode()
             if isinstance(self.problem, SQLProblem):
@@ -967,6 +1115,34 @@ class DSATUI(App):
                     self.push_screen("problem_picker")
             else:
                 self.push_screen("startup", on_startup_done)
+
+    def _sync_main_gutter(self, scroll_y: float) -> None:
+        self.query_one("#main-gutter", SlopGutter).sync_scroll(int(scroll_y))
+
+    def _sync_slop_gutter(self, scroll_y: float) -> None:
+        self.query_one("#slop-gutter", SlopGutter).sync_scroll(int(scroll_y))
+
+    def update_editor_lint(self, issues: List[Dict]) -> None:
+        """Update the main editor gutter with linting results."""
+        self._main_lint_issues = {int(i["line"]): i["message"] for i in issues}
+        self.query_one("#main-gutter", SlopGutter).update_markers(issues)
+
+    def _on_main_cursor_move(self, location) -> None:
+        """Show linting messages in the status bar when the cursor moves."""
+        if self.mode == "DSA" and hasattr(self, "_main_lint_issues"):
+            line = location[0] + 1
+            if line in self._main_lint_issues:
+                self.update_status(f"Lint: {self._main_lint_issues[line]}")
+            else:
+                self.update_status(f"Problem: {self.problem.title if self.problem else 'Ready'}")
+
+    def _on_slop_cursor_move(self, location) -> None:
+        if self.mode == "FixSlop" and self._slop_issues:
+            line = location[0] + 1 # 1-indexed
+            if line in self._slop_issues:
+                self.update_status(f"Issue: {self._slop_issues[line]}")
+            else:
+                self.update_status("Fix AI Slop Mode")
 
     def load_problem(self, problem) -> None:
         self.problem = problem
@@ -1123,13 +1299,27 @@ class DSATUI(App):
         self.notify("AI: Analyzing slop...")
         md_widget = self.query_one("#ai-markdown", Markdown)
         md_widget.update("### Slop Analysis\n\n*Analyzing issues...* ▌")
-
-        full_text = "### Slop Analysis\n\n"
+        
+        full_json = ""
         try:
-            async for chunk in self.ai.analyze_slop(code):
-                full_text += chunk
-                md_widget.update(full_text + " ▌")
-            md_widget.update(full_text)
+            async for chunk in self.app.ai.analyze_slop(code):
+                full_json += chunk
+            
+            issues = json.loads(full_json)
+            # Store issues for reference when cursor moves
+            self._slop_issues = {int(i["line"]): i["message"] for i in issues}
+            
+            # Update Gutter
+            self.query_one("#slop-gutter", SlopGutter).update_markers(issues)
+            
+            # Summary for AI Pane
+            red = sum(1 for i in issues if i["severity"] == "red")
+            yellow = sum(1 for i in issues if i["severity"] == "yellow")
+            green = sum(1 for i in issues if i["severity"] == "green")
+            
+            summary = f"**{red} critical** · **{yellow} warnings** · **{green} style**"
+            md_widget.update(f"### Slop Analysis\n\n{summary}\n\n*Hover/Select line in left pane to see details.*")
+            
         except Exception as e:
             self.report_error(e, "Slop Analysis")
     def update_layout_for_mode(self) -> None:

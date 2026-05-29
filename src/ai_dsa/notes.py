@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional
+from .database import Database
 
-def add_note(db, problem_id: str, mode: str, content: str, source: str):
+def add_note(db: Database, problem_id: str, mode: str, content: str, source: str) -> None:
     """Adds a note to the database."""
     with db._get_connection() as conn:
         conn.execute(
@@ -9,7 +10,16 @@ def add_note(db, problem_id: str, mode: str, content: str, source: str):
         )
         conn.commit()
 
-def get_notes(db, problem_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def update_note(db: Database, note_id: int, content: str) -> None:
+    """Updates the content of an existing note."""
+    with db._get_connection() as conn:
+        conn.execute(
+            "UPDATE notes SET content = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?",
+            (content, note_id)
+        )
+        conn.commit()
+
+def get_notes(db: Database, problem_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Retrieves notes from the database, optionally filtered by problem_id."""
     with db._get_connection() as conn:
         if problem_id:

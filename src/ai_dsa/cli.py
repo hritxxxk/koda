@@ -11,10 +11,12 @@ from .models import ProblemBank, SQLProblemBank
 load_dotenv()
 
 @click.group()
+@click.option('--profile', is_flag=True, help='Run with cProfile enabled.')
 @click.pass_context
-def main(ctx):
-    """ai-dsa: Practice Data Structures and Algorithms in your terminal."""
+def main(ctx, profile):
+    """Koda: Modern terminal training for DSA, SQL, and code refinement."""
     ctx.ensure_object(dict)
+    ctx.obj['profile'] = profile
     
     # Paths
     base_dir = os.path.expanduser("~/.local/share/ai-dsa")
@@ -38,7 +40,7 @@ def main(ctx):
     sql_bank.sync_to_db(db)
     
     # DB Maintenance
-    db.run_maintenance()
+    db.run_maintenance(bank, sql_bank)
     
     ctx.obj['db'] = db
     ctx.obj['sandbox'] = Sandbox()
@@ -109,7 +111,21 @@ def start(ctx, topic, problem_id, dsa, sql, fix):
     app.sandbox = ctx.obj['sandbox']
     app.sql_sandbox = ctx.obj['sql_sandbox']
 
-    app.run()
+    if ctx.obj.get('profile'):
+        import cProfile
+        import pstats
+        profiler = cProfile.Profile()
+        profiler.enable()
+        try:
+            app.run()
+        finally:
+            profiler.disable()
+            with open("profile_output.txt", "w") as f:
+                ps = pstats.Stats(profiler, stream=f).sort_stats('cumulative')
+                ps.print_stats()
+            click.echo("Profile results written to profile_output.txt")
+    else:
+        app.run()
 
 @main.command()
 @click.argument('file', type=click.Path(exists=True))

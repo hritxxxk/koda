@@ -234,23 +234,25 @@ Ensure the schema_definition is valid SQLite and includes enough seed data to te
     async def analyze_slop(self, code: str) -> AsyncGenerator[str, None]:
         prompt = f"""
 System: You are an expert at identifying "AI slop" in code. 
-Slop includes: redundant comments, overly verbose logic, common AI patterns (like always using 'result = []'), 
-and missed edge cases.
-
-Analyze this code and provide a list of issues. For each issue, specify the line number, severity (red/yellow/green), 
-and a brief message.
+Analyze the following code and return a JSON list of issues.
+Each issue must have:
+- line: int (1-indexed)
+- severity: "red" (correctness), "yellow" (slop/verbose), or "green" (style)
+- message: str (brief description)
 
 Code:
 {code}
 
-Analysis:"""
-        response = self.client.models.generate_content_stream(
+Return ONLY a valid JSON list of objects:"""
+        response = self.client.models.generate_content(
             model=self.model_name,
             contents=prompt,
-            config=self.types.GenerateContentConfig(max_output_tokens=1024)
+            config=self.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                max_output_tokens=2048
+            )
         )
-        for chunk in response:
-            yield chunk.text
+        yield response.text
 
     async def validate_fix(self, original: str, rewrite: str) -> AsyncGenerator[str, None]:
         prompt = f"""

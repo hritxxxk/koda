@@ -1,8 +1,38 @@
 import random
 from typing import Optional, Dict, Any, List
+from .database import Database
+from .models import ProblemBank, SQLProblemBank
 
-def get_next_problem(db, bank, sql_bank, mode: str, current_problem_id: str) -> Optional[Any]:
-    """Recommends the next problem based on user performance."""
+def get_user_level_for_topic(db: Database, bank: ProblemBank, sql_bank: SQLProblemBank, topic: str, mode: str) -> str:
+    """Determines current level for a topic: Easy, Medium, or Hard."""
+    with db._get_connection() as conn:
+        # Get all passed problems for this user
+        rows = conn.execute("SELECT DISTINCT problem_id FROM submissions WHERE passed = 1").fetchall()
+        passed_ids = {r["problem_id"] for r in rows}
+        
+        # Determine current level
+        # Start at Easy. If passed any Easy, move to Medium. If passed any Medium, move to Hard.
+        
+        has_passed_easy = False
+        has_passed_medium = False
+        
+        if mode == "DSA":
+            for p in bank.problems:
+                if p.topic == topic and p.id in passed_ids:
+                    if p.difficulty == "Easy": has_passed_easy = True
+                    if p.difficulty == "Medium": has_passed_medium = True
+        elif mode == "SQL":
+            for p in sql_bank.problems:
+                if p.category == topic and p.id in passed_ids:
+                    if p.difficulty == "Easy": has_passed_easy = True
+                    if p.difficulty == "Medium": has_passed_medium = True
+                    
+        if has_passed_medium: return "Hard"
+        if has_passed_easy: return "Medium"
+        return "Easy"
+
+def get_next_problem(db: Database, bank: ProblemBank, sql_bank: SQLProblemBank, mode: str, current_problem_id: str) -> Optional[Any]:
+    """Recommends the next problem based on user performance and strict difficulty progression."""
     with db._get_connection() as conn:
         # 1. Identify weak point: highest avg_hints_used and lowest pass rate
         # We can combine these into a 'struggle_score'
@@ -17,17 +47,27 @@ def get_next_problem(db, bank, sql_bank, mode: str, current_problem_id: str) -> 
         
         if row:
             weak_topic = row["topic"]
-            # 2. Find an unsolved problem in that topic
-            # First, get solved problem IDs
+            # 2. Determine target difficulty for this topic
+            target_difficulty = get_user_level_for_topic(db, bank, sql_bank, weak_topic, mode)
+            
+            # 3. Find an unsolved problem in that topic at that difficulty
             solved_rows = conn.execute("SELECT DISTINCT problem_id FROM submissions WHERE passed = 1").fetchall()
             solved_ids = {r["problem_id"] for r in solved_rows}
             
             if mode == "DSA":
-                problems = [p for p in bank.problems if p.topic == weak_topic and p.id not in solved_ids and p.id != current_problem_id]
+                # Try target difficulty first
+                problems = [p for p in bank.problems if p.topic == weak_topic and p.difficulty == target_difficulty and p.id not in solved_ids and p.id != current_problem_id]
+                if not problems:
+                    # Fallback: any unsolved in this topic
+                    problems = [p for p in bank.problems if p.topic == weak_topic and p.id not in solved_ids and p.id != current_problem_id]
                 if problems:
                     return random.choice(problems)
             elif mode == "SQL":
-                problems = [p for p in sql_bank.problems if p.category == weak_topic and p.id not in solved_ids and p.id != current_problem_id]
+                # Try target difficulty first
+                problems = [p for p in sql_bank.problems if p.category == weak_topic and p.difficulty == target_difficulty and p.id not in solved_ids and p.id != current_problem_id]
+                if not problems:
+                    # Fallback: any unsolved in this topic
+                    problems = [p for p in sql_bank.problems if p.category == weak_topic and p.id not in solved_ids and p.id != current_problem_id]
                 if problems:
                     return random.choice(problems)
                     
@@ -48,7 +88,7 @@ def get_next_problem(db, bank, sql_bank, mode: str, current_problem_id: str) -> 
             
     return None
 
-def get_review_problem(db, bank, sql_bank, mode: str) -> Optional[Any]:
+def get_review_problem(db: Database, bank: ProblemBank, sql_bank: SQLProblemBank, mode: str) -> Optional[Any]:
     """Implements spaced repetition: returns oldest unresolved failure if > 3 days old."""
     from datetime import datetime, timedelta
     
