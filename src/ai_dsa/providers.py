@@ -67,6 +67,12 @@ class AIProvider(ABC):
     async def reset_history(self) -> None:
         """Clear the internal conversation history."""
         pass
+    
+    @abstractmethod
+    async def ask_question(
+        self, problem_description: str, current_code: str, question: str, mode: str = "DSA"
+    ) -> AsyncGenerator[str, None]:
+        pass
 
 class GeminiProvider(AIProvider):
     def __init__(self, api_key: str, model_name: str = "gemini-3.5-flash"):
@@ -77,13 +83,11 @@ class GeminiProvider(AIProvider):
         self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
 
-    async def _stream_to_generator(self, stream):
-        iterator = iter(stream)
-        while True:
-            chunk = await asyncio.to_thread(next, iterator, None)
-            if chunk is None:
-                break
-            yield chunk
+    async def _run_stream(self, stream) -> str:
+        """Runs a synchronous Gemini stream in a thread and returns the full text."""
+        def collect():
+            return "".join(chunk.text for chunk in stream)
+        return await asyncio.to_thread(collect)
 
     async def stream_hint(
         self, problem_description: str, current_code: str, history: List[Dict[str, str]], level: int = 1, mode: str = "DSA"
@@ -99,29 +103,65 @@ class GeminiProvider(AIProvider):
         
         prompt = f"System: You are a {role}. {instruction}\nDo NOT give the full solution.\nProblem: {problem_description}\nCode: {current_code}\nHistory: {history_text}"
         
-        response = await asyncio.to_thread(
-            self.client.models.generate_content_stream,
+        stream = self.client.models.generate_content_stream(
             model=self.model_name,
             contents=prompt,
             config=self.types.GenerateContentConfig(max_output_tokens=300)
         )
-        async for chunk in self._stream_to_generator(response):
-            yield chunk.text
+        full_text = await self._run_stream(stream)
+        yield full_text
+
 
     async def review_code(self, problem_description: str, code: str, mode: str = "DSA") -> AsyncGenerator[str, None]:
         system = "Senior Database Engineer" if mode == "SQL" else "Senior Software Engineer"
         prompt = f"System: {system}. Review for correctness, complexity, and style.\nProblem: {problem_description}\nCode: {code}"
-        response = await asyncio.to_thread(
-            self.client.models.generate_content_stream,
+        stream = self.client.models.generate_content_stream(
             model=self.model_name,
             contents=prompt,
             config=self.types.GenerateContentConfig(max_output_tokens=512)
         )
-        async for chunk in self._stream_to_generator(response):
-            yield chunk.text
+        full_text = await self._run_stream(stream)
+        yield full_text
 
     async def generate_problem(self, mode: str = "random", topic: str = "Any", difficulty: str = "Medium") -> Dict[str, Any]:
-        prompt = f"Generate a {difficulty} DSA problem on {topic}. Return ONLY valid JSON matching the standard schema (id, title, difficulty, topic, description, constraints, function, test_cases)."
+        prompt = f"""Generate a {difficulty} DSA problem on {topic}.
+
+Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
+
+RULES FOR test_cases — this is the most important part:
+- "input" contains one line per function parameter, in order, separated by \\n
+- "expected" is the return value
+- Every value must be valid JSON:
+    - Lists:    [1, 2, 3]      NOT  1, 2, 3
+    - Strings:  "hello"        NOT  hello
+    - Numbers:  42             just the number
+    - Booleans: true or false  lowercase
+
+EXAMPLES of correct test_cases for different problem types:
+
+Function takes (nums: List[int], target: int) -> List[int]:
+  input = "[2,7,11,15]\\n9"      expected = "[0,1]"
+
+Function takes (s: str) -> int:
+  input = "\\"anagram\\""          expected = "7"
+
+Function takes (root: List[int], k: int) -> int:  (tree given as level-order list)
+  input = "[3,1,4,null,2]\\n1"   expected = "1"
+
+Function takes (grid: List[List[int]]) -> int:
+  input = "[[1,0,1],[0,1,0]]"    expected = "3"
+
+Function takes (a: List[int], b: List[int]) -> List[int]:
+  input = "[1,2,3]\\n[4,5,6]"    expected = "[1,2,3,4,5,6]"
+
+Function takes (s: str, t: str) -> bool:
+  input = "\\"anagram\\"\\n\\"nagaram\\""  expected = "true"
+
+Function takes (n: int) -> List[int]:
+  input = "5"                    expected = "[0,1,1,2,3]"
+
+Follow these rules for every test case you generate, regardless of problem type.
+"""
         response = await asyncio.to_thread(
             self.client.models.generate_content,
             model=self.model_name,
@@ -142,14 +182,13 @@ class GeminiProvider(AIProvider):
 
     async def generate_slop(self, statement: str) -> AsyncGenerator[str, None]:
         prompt = f"Generate functionally correct but intentionally 'sloppy' code for: {statement}. No markdown."
-        response = await asyncio.to_thread(
-            self.client.models.generate_content_stream,
+        stream = self.client.models.generate_content_stream(
             model=self.model_name,
             contents=prompt,
             config=self.types.GenerateContentConfig(max_output_tokens=1024)
         )
-        async for chunk in self._stream_to_generator(response):
-            yield chunk.text
+        full_text = await self._run_stream(stream)
+        yield full_text
 
     async def analyze_slop(self, code: str) -> AsyncGenerator[str, None]:
         prompt = f"Analyze this code for 'AI slop'. Return ONLY a JSON list of objects with keys: line, severity ('red', 'yellow', 'green'), and message. Code:\n{code}"
@@ -163,14 +202,13 @@ class GeminiProvider(AIProvider):
 
     async def validate_fix(self, original: str, rewrite: str) -> AsyncGenerator[str, None]:
         prompt = f"Compare original slop code with rewrite. Did the user fix the issues?\nOriginal: {original}\nRewrite: {rewrite}"
-        response = await asyncio.to_thread(
-            self.client.models.generate_content_stream,
+        stream = self.client.models.generate_content_stream(
             model=self.model_name,
             contents=prompt,
             config=self.types.GenerateContentConfig(max_output_tokens=1024)
         )
-        async for chunk in self._stream_to_generator(response):
-            yield chunk.text
+        full_text = await self._run_stream(stream)
+        yield full_text
 
     async def classify_failure(self, code: str, problem_description: str, test_results: str) -> str:
         prompt = f"Classify failure into ONE: wrong_algorithm, edge_case_missed, off_by_one, syntax_error, timeout, unknown.\nProblem: {problem_description}\nCode: {code}\nResults: {test_results}"
@@ -204,6 +242,18 @@ class GeminiProvider(AIProvider):
         """Clear the internal conversation history."""
         pass
 
+    async def ask_question(
+        self, problem_description: str, current_code: str, question: str, mode: str = "DSA"
+    ) -> AsyncGenerator[str, None]:
+        prompt = f"Problem: {problem_description}\nCode: {current_code}\nQuestion: {question}"
+        stream = self.client.models.generate_content_stream(
+            model=self.model_name,
+            contents=prompt,
+            config=self.types.GenerateContentConfig(max_output_tokens=512)
+        )
+        full_text = await self._run_stream(stream)
+        yield full_text
+
 class AnthropicProvider(AIProvider):
     def __init__(self, api_key: str, model_name: str = "claude-opus-4-8"):
         from anthropic import AsyncAnthropic
@@ -221,7 +271,44 @@ class AnthropicProvider(AIProvider):
             async for text in stream.text_stream: yield text
 
     async def generate_problem(self, mode: str = "random", topic: str = "Any", difficulty: str = "Medium") -> Dict[str, Any]:
-        prompt = f"Generate a {difficulty} DSA problem on {topic}. Return ONLY valid JSON matching the standard schema."
+        prompt = f"""Generate a {difficulty} DSA problem on {topic}.
+
+Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
+
+RULES FOR test_cases — this is the most important part:
+- "input" contains one line per function parameter, in order, separated by \\n
+- "expected" is the return value
+- Every value must be valid JSON:
+    - Lists:    [1, 2, 3]      NOT  1, 2, 3
+    - Strings:  "hello"        NOT  hello
+    - Numbers:  42             just the number
+    - Booleans: true or false  lowercase
+
+EXAMPLES of correct test_cases for different problem types:
+
+Function takes (nums: List[int], target: int) -> List[int]:
+  input = "[2,7,11,15]\\n9"      expected = "[0,1]"
+
+Function takes (s: str) -> int:
+  input = "\\"anagram\\""          expected = "7"
+
+Function takes (root: List[int], k: int) -> int:  (tree given as level-order list)
+  input = "[3,1,4,null,2]\\n1"   expected = "1"
+
+Function takes (grid: List[List[int]]) -> int:
+  input = "[[1,0,1],[0,1,0]]"    expected = "3"
+
+Function takes (a: List[int], b: List[int]) -> List[int]:
+  input = "[1,2,3]\\n[4,5,6]"    expected = "[1,2,3,4,5,6]"
+
+Function takes (s: str, t: str) -> bool:
+  input = "\\"anagram\\"\\n\\"nagaram\\""  expected = "true"
+
+Function takes (n: int) -> List[int]:
+  input = "5"                    expected = "[0,1,1,2,3]"
+
+Follow these rules for every test case you generate, regardless of problem type.
+"""
         message = await self.client.messages.create(model=self.model_name, max_tokens=2048, messages=[{"role": "user", "content": prompt}])
         return json.loads(message.content[0].text)
 
@@ -258,9 +345,24 @@ class AnthropicProvider(AIProvider):
         prompt = f"Provide ONE concise sentence (max 20 words) takeaway for this solution.\nProblem: {problem_description}\nCode: {code}"
         message = await self.client.messages.create(model=self.model_name, max_tokens=100, messages=[{"role": "user", "content": prompt}])
         return message.content[0].text.strip()
+    async def get_available_models(self) -> List[str]:
+        return []
+
+    async def reset_history(self) -> None:
+        pass
+    
+    async def ask_question(self, problem_description: str, current_code: str, question: str, mode: str = "DSA") -> AsyncGenerator[str, None]:
+        prompt = f"Problem: {problem_description}\nCode: {current_code}\nQuestion: {question}"
+        stream = self.client.models.generate_content_stream(
+            model=self.model_name,
+            contents=prompt,
+            config=self.types.GenerateContentConfig(max_output_tokens=512)
+        )
+        full_text = await self._run_stream(stream)
+        yield full_text
 
 class OpenAIProvider(AIProvider):
-    def __init__(self, api_key: str, model_name: str = "gpt-5.5"):
+    def __init__(self, api_key: str, model_name: str = "gpt-4.1-mini"):
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(api_key=api_key)
         self.model_name = model_name
@@ -278,7 +380,44 @@ class OpenAIProvider(AIProvider):
             if chunk.choices[0].delta.content: yield chunk.choices[0].delta.content
 
     async def generate_problem(self, mode: str = "random", topic: str = "Any", difficulty: str = "Medium") -> Dict[str, Any]:
-        prompt = f"Generate a {difficulty} DSA problem on {topic}. Return ONLY valid JSON matching the standard schema."
+        prompt = f"""Generate a {difficulty} DSA problem on {topic}.
+
+Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
+
+RULES FOR test_cases — this is the most important part:
+- "input" contains one line per function parameter, in order, separated by \\n
+- "expected" is the return value
+- Every value must be valid JSON:
+    - Lists:    [1, 2, 3]      NOT  1, 2, 3
+    - Strings:  "hello"        NOT  hello
+    - Numbers:  42             just the number
+    - Booleans: true or false  lowercase
+
+EXAMPLES of correct test_cases for different problem types:
+
+Function takes (nums: List[int], target: int) -> List[int]:
+  input = "[2,7,11,15]\\n9"      expected = "[0,1]"
+
+Function takes (s: str) -> int:
+  input = "\\"anagram\\""          expected = "7"
+
+Function takes (root: List[int], k: int) -> int:  (tree given as level-order list)
+  input = "[3,1,4,null,2]\\n1"   expected = "1"
+
+Function takes (grid: List[List[int]]) -> int:
+  input = "[[1,0,1],[0,1,0]]"    expected = "3"
+
+Function takes (a: List[int], b: List[int]) -> List[int]:
+  input = "[1,2,3]\\n[4,5,6]"    expected = "[1,2,3,4,5,6]"
+
+Function takes (s: str, t: str) -> bool:
+  input = "\\"anagram\\"\\n\\"nagaram\\""  expected = "true"
+
+Function takes (n: int) -> List[int]:
+  input = "5"                    expected = "[0,1,1,2,3]"
+
+Follow these rules for every test case you generate, regardless of problem type.
+"""
         response = await self.client.chat.completions.create(model=self.model_name, messages=[{"role": "user", "content": prompt}], max_tokens=2048, response_format={"type": "json_object"})
         return json.loads(response.choices[0].message.content)
 
@@ -317,6 +456,18 @@ class OpenAIProvider(AIProvider):
         prompt = f"Provide ONE concise sentence (max 20 words) takeaway for this solution.\nProblem: {problem_description}\nCode: {code}"
         response = await self.client.chat.completions.create(model=self.model_name, messages=[{"role": "user", "content": prompt}], max_tokens=100)
         return response.choices[0].message.content.strip()
+    
+    async def get_available_models(self) -> List[str]:
+        return []
+
+    async def reset_history(self) -> None:
+        pass
+    
+    async def ask_question(self, problem_description: str, current_code: str, question: str, mode: str = "DSA") -> AsyncGenerator[str, None]:
+        prompt = f"Problem: {problem_description}\nCode: {current_code}\nQuestion: {question}"
+        stream = await self.client.chat.completions.create(model=self.model_name, messages=[{"role": "user", "content": prompt}], max_tokens=512, stream=True)
+        async for chunk in stream:
+            if chunk.choices[0].delta.content: yield chunk.choices[0].delta.content
 
 class OllamaProvider(AIProvider):
     def __init__(self, model_name: str = "llama4-maverick", base_url: str = "http://localhost:11434"):
@@ -343,7 +494,44 @@ class OllamaProvider(AIProvider):
 
     async def generate_problem(self, mode: str = "random", topic: str = "Any", difficulty: str = "Medium") -> Dict[str, Any]:
         import httpx
-        prompt = f"Generate a {difficulty} DSA problem on {topic}. Return ONLY valid JSON matching the standard schema."
+        prompt = f"""Generate a {difficulty} DSA problem on {topic}.
+
+Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
+
+RULES FOR test_cases — this is the most important part:
+- "input" contains one line per function parameter, in order, separated by \\n
+- "expected" is the return value
+- Every value must be valid JSON:
+    - Lists:    [1, 2, 3]      NOT  1, 2, 3
+    - Strings:  "hello"        NOT  hello
+    - Numbers:  42             just the number
+    - Booleans: true or false  lowercase
+
+EXAMPLES of correct test_cases for different problem types:
+
+Function takes (nums: List[int], target: int) -> List[int]:
+  input = "[2,7,11,15]\\n9"      expected = "[0,1]"
+
+Function takes (s: str) -> int:
+  input = "\\"anagram\\""          expected = "7"
+
+Function takes (root: List[int], k: int) -> int:  (tree given as level-order list)
+  input = "[3,1,4,null,2]\\n1"   expected = "1"
+
+Function takes (grid: List[List[int]]) -> int:
+  input = "[[1,0,1],[0,1,0]]"    expected = "3"
+
+Function takes (a: List[int], b: List[int]) -> List[int]:
+  input = "[1,2,3]\\n[4,5,6]"    expected = "[1,2,3,4,5,6]"
+
+Function takes (s: str, t: str) -> bool:
+  input = "\\"anagram\\"\\n\\"nagaram\\""  expected = "true"
+
+Function takes (n: int) -> List[int]:
+  input = "5"                    expected = "[0,1,1,2,3]"
+
+Follow these rules for every test case you generate, regardless of problem type.
+"""
         async with httpx.AsyncClient() as client:
             res = await client.post(f"{self.base_url}/api/generate", json={"model": self.model_name, "prompt": prompt, "stream": False, "options": {"num_predict": 2048}})
             return json.loads(res.json()["response"])
@@ -387,3 +575,13 @@ class OllamaProvider(AIProvider):
         async with httpx.AsyncClient() as client:
             res = await client.post(f"{self.base_url}/api/generate", json={"model": self.model_name, "prompt": prompt, "stream": False, "options": {"num_predict": 100}})
             return res.json().get("response", "").strip()
+        
+    async def get_available_models(self) -> List[str]:
+        return []
+
+    async def reset_history(self) -> None:
+        pass
+    
+    async def ask_question(self, problem_description: str, current_code: str, question: str, mode: str = "DSA") -> AsyncGenerator[str, None]:
+        prompt = f"Problem: {problem_description}\nCode: {current_code}\nQuestion: {question}"
+        async for chunk in self._stream_request(prompt, max_tokens=512): yield chunk

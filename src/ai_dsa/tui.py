@@ -568,27 +568,36 @@ class OptionsScreen(ModalScreen):
             asyncio.create_task(self.update_models(str(event.value)))
 
     async def update_models(self, provider: str) -> None:
-        """Dynamically fetch models from the provider."""
-        select = self.query_one("#model-select", Select)
-        
-        try:
-            # Call the provider's dynamic model list
-            # This assumes you added 'async def get_available_models(self)' to your providers
-            available_models = await self.app.ai.get_available_models()
-            
-            # Convert list of strings to list of tuples for Textual Select
-            # e.g., ["gpt-5.5", "gpt-4o"] -> [("GPT-5.5", "gpt-5.5"), ...]
-            models = [(m.replace("_", " ").title(), m) for m in available_models]
-        except Exception:
-            # Fallback to basic defaults if API call fails
-            models = [("Default Model", "default")]
+            select = self.query_one("#model-select", Select)
 
-        select.set_options(models)
-        saved_model = self.app.db.get_setting("ai_model")
-        if saved_model and any(m[1] == saved_model for m in models):
-            select.value = saved_model
-        else:
-            select.value = models[0][1] if models else None
+            if provider == "gemini":
+                models = [
+                    ("Gemini 2.5 Flash", "gemini-2.5-flash")
+                ]
+            elif provider == "anthropic":
+                models = [
+                    ("Claude Sonnet 4.6", "claude-sonnet-4-6")
+                ]
+            elif provider == "openai":
+                models = [
+                    ("GPT-4.1 Mini", "gpt-4.1-mini")
+                ]
+            else:  # ollama
+                # Llama 4 "Maverick" is the 2026 open-weight king
+                models = [
+                    ("Llama 4 (Maverick)", "llama4-maverick"),
+                    ("Qwen 3 (Coder)", "qwen3-coder"),
+                    ("Gemma 4 (9B)", "gemma4:9b"),
+                    ("Mistral Large 3", "mistral-large-3")
+                ]
+
+            select.set_options(models)
+            saved_model = self.app.db.get_setting("ai_model")
+            if saved_model and any(m[1] == saved_model for m in models):
+                select.value = saved_model
+            else:
+                # Default to the first (usually the most powerful) model in the list
+                select.value = models[0][1]
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-btn":
@@ -660,6 +669,25 @@ class DSATUI(App):
         layout: grid;
         grid-size: 3;
         grid-columns: 30fr 40fr 30fr;
+    }
+    
+    #app-container.fix-slop-layout {
+        layout: vertical;
+        grid-size: 0; /* Reset grid */
+    }
+    
+    #app-container.fix-slop-layout #problem-pane {
+        height: 20%;
+    }
+    
+    #app-container.fix-slop-layout #editor-pane {
+        height: 60%;
+        width: 100%;
+    }
+    
+    #app-container.fix-slop-layout #ai-pane {
+        height: 20%;
+        width: 100%;
     }
 
     #startup-container {
@@ -1370,8 +1398,10 @@ class DSATUI(App):
     def update_layout_for_mode(self) -> None:
         editor = self.query_one("#code-editor")
         slop_container = self.query_one("#slop-container")
+        app_container = self.query_one("#app-container")
         
         if self.mode == "FixSlop":
+            app_container.add_class("fix-slop-layout")
             editor.display = False
             slop_container.display = True
             self.query_one("#problem-pane").border_title = "Fix AI Slop"
@@ -1379,6 +1409,7 @@ class DSATUI(App):
                 "# Fix AI Slop Mode\n\n1. Paste AI-generated code (`Ctrl+V` or `/paste`)\n2. AI will annotate correctness, slop, and style\n3. Rewrite it on the right\n4. `/submit` to validate your fix"
             )
         elif self.mode == "SQL":
+            app_container.remove_class("fix-slop-layout")
             editor.display = True
             slop_container.display = False
             editor.language = "sql"
@@ -1389,6 +1420,7 @@ class DSATUI(App):
                 else:
                     self.notify("No SQL problems found in data/sql/", severity="warning")
         else: # DSA
+            app_container.remove_class("fix-slop-layout")
             editor.display = True
             slop_container.display = False
             editor.language = "python"

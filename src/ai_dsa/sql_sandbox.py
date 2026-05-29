@@ -11,8 +11,17 @@ class SQLSandbox:
     def run_query(self, query: str, schema_definition: str, expected_output: str) -> Dict[str, Any]:
         """Runs a SQL query and compares the result with the expected output."""
         start_time = time.perf_counter()
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", timeout=self.timeout_sec)
         conn.row_factory = sqlite3.Row
+        
+        start_ref = [time.perf_counter()]
+
+        def progress_handler():
+            if time.perf_counter() - start_ref[0] > self.timeout_sec:
+                return 1  # non-zero return cancels the query
+            return 0
+
+        conn.set_progress_handler(progress_handler, 100)
         
         success = False
         error = None

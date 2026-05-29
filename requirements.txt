@@ -1,5 +1,4 @@
 google-genai
-sqlite3
 anthropic
 openai
 httpx
